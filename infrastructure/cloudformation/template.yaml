@@ -1,0 +1,244 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  StudyBuddy Infrastructure for Amazon Build Ship Shape 2026
+  Deploys DynamoDB, Lambda, API Gateway, and CloudWatch resources
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: StudyBuddy
+    Description: Project name for resource naming
+  
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-3-haiku-20240307-v1:0
+    Description: Bedrock model ID for LLM operations
+  
+  DailyStudyCap:
+    Type: Number
+    Default: 240
+    Description: Daily study cap in minutes
+
+Resources:
+  # DynamoDB Table (Single-Table Design)
+  StudyBuddyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}Data"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: Production
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}LambdaRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: StudyBuddyPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt StudyBuddyTable.Arn
+                  - !Sub "${StudyBuddyTable.Arn}/index/*"
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  # Lambda Function (MCP Server)
+  MCPServerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-MCP-Server"
+      Runtime: python3.12
+      Handler: server.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          # Placeholder - actual code deployed via CI/CD
+          def lambda_handler(event, context):
+              return {"statusCode": 200, "body": "StudyBuddy MCP Server"}
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref StudyBuddyTable
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          DAILY_STUDY_CAP: !Ref DailyStudyCap
+      Timeout: 30
+      MemorySize: 512
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # API Gateway (HTTP API)
+  StudyBuddyAPI:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${ProjectName}-API"
+      ProtocolType: HTTP
+      Target: !GetAtt MCPServerFunction.Arn
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+        AllowHeaders:
+          - "*"
+
+  # Lambda Permission for API Gateway
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MCPServerFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "${StudyBuddyAPI.Arn}/*"
+
+  # CloudWatch Log Group
+  StudyBuddyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${ProjectName}/agents"
+      RetentionInDays: 30
+
+  # CloudWatch Dashboard
+  StudyBuddyDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ProjectName}-Monitoring"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "title": "Agent Latency",
+                "metrics": [
+                  ["StudyBuddy", "check_in_latency", {"stat": "Average"}],
+                  ["StudyBuddy", "plan_creation_latency", {"stat": "Average"}],
+                  ["StudyBuddy", "safety_check_latency", {"stat": "Average"}]
+                ],
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 1000
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "Agent Calls",
+                "metrics": [
+                  ["StudyBuddy", "agent_calls", "Agent", "supervisor", {"stat": "Sum"}],
+                  ["StudyBuddy", "agent_calls", "Agent", "planner", {"stat": "Sum"}],
+                  ["StudyBuddy", "agent_calls", "Agent", "safety", {"stat": "Sum"}]
+                ],
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "User Engagement",
+                "metrics": [
+                  ["StudyBuddy", "user_engagement", "Event", "check_in", {"stat": "Sum"}],
+                  ["StudyBuddy", "user_engagement", "Event", "session_complete", {"stat": "Sum"}],
+                  ["StudyBuddy", "user_engagement", "Event", "override", {"stat": "Sum"}]
+                ],
+                "period": 3600
+              }
+            }
+          ]
+        }
+
+  # EventBridge Rule (Proactive Agent)
+  ProactiveScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-Proactive-Schedule"
+      Description: "Trigger proactive agent daily"
+      ScheduleExpression: "cron(0 19 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Id: ProactiveTarget
+          Arn: !GetAtt MCPServerFunction.Arn
+
+Outputs:
+  DynamoDBTable:
+    Description: DynamoDB Table Name
+    Value: !Ref StudyBuddyTable
+    Export:
+      Name: !Sub "${ProjectName}-Table"
+
+  APIEndpoint:
+    Description: API Gateway Endpoint
+    Value: !Sub "${StudyBuddyAPI.ApiEndpoint}"
+    Export:
+      Name: !Sub "${ProjectName}-API-Endpoint"
+
+  CloudWatchDashboard:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProjectName}-Monitoring"

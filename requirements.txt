@@ -1,0 +1,55 @@
+# Core Framework
+fastmcp>=2.0.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# AWS Integration
+boto3>=1.35.0
+botocore>=1.35.0
+
+# Data & Caching
+aiosqlite>=0.20.0
+redis>=5.2.0
+
+# HTTP & API
+httpx>=0.28.0
+websockets>=14.0
+
+# Dashboard & Visualization
+streamlit>=1.41.0
+plotly>=5.24.0
+pandas>=2.2.0
+numpy>=2.1.0
+
+# Voice & Audio
+SpeechRecognition>=3.14.0
+pyttsx3>=2.98
+gTTS>=2.5.0
+pyaudio>=0.2.14
+
+# Observability & Logging
+structlog>=24.4.0
+python-json-logger>=3.2.0
+
+# Testing
+pytest>=8.3.0
+pytest-asyncio>=0.25.0
+pytest-cov>=6.0.0
+httpx>=0.28.0
+
+# Development
+python-dotenv>=1.0.0
+black>=24.10.0
+ruff>=0.8.0
+mypy>=1.14.0
+
+# Scheduling (Proactive Agent)
+APScheduler>=3.11.0
+schedule>=1.2.0
+
+# Security
+bcrypt>=4.2.0
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.0

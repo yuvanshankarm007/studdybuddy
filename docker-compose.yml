@@ -1,0 +1,130 @@
+version: '3.8'
+
+services:
+  # DynamoDB Local for development (host port 8004 to avoid collision with mcp-server on 8000!)
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: studybuddy-dynamodb
+    ports:
+      - "8004:8000"
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath ./data"
+    networks:
+      - studybuddy-network
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: studybuddy-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - studybuddy-network
+
+  # MCP Server (StudyBuddy Core)
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: studybuddy-mcp
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=development
+      - AWS_REGION=us-east-1
+      - DYNAMODB_ENDPOINT_URL=http://dynamodb-local:8000
+      - WELLNESS_AGENT_URL=http://wellness-agent:8001
+      - REDIS_URL=redis://redis:6379/0
+      - WELLNESS_PROVIDER=simulated
+      - ENABLE_VOICE=true
+      - ENABLE_PROACTIVE=true
+    volumes:
+      - ./src:/app/src
+      - ./dashboard:/app/dashboard
+      - ./data:/app/data
+    depends_on:
+      - dynamodb-local
+      - redis
+    networks:
+      - studybuddy-network
+    command: python -m src.server
+
+  # Wellness Agent (A2A)
+  wellness-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: studybuddy-wellness
+    ports:
+      - "8001:8001"
+    environment:
+      - APP_ENV=development
+      - WELLNESS_PROVIDER=simulated
+    volumes:
+      - ./src:/app/src
+    networks:
+      - studybuddy-network
+    command: python -m src.agents.wellness
+
+  # REST API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: studybuddy-api
+    ports:
+      - "8002:8002"
+    environment:
+      - APP_ENV=development
+      - AWS_REGION=us-east-1
+      - DYNAMODB_ENDPOINT_URL=http://dynamodb-local:8000
+      - WELLNESS_AGENT_URL=http://wellness-agent:8001
+      - REDIS_URL=redis://redis:6379/0
+      - ENABLE_VOICE=true
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    depends_on:
+      - dynamodb-local
+      - redis
+      - wellness-agent
+    networks:
+      - studybuddy-network
+    command: python -m src.api
+
+  # Streamlit Dashboard (AG-UI)
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: studybuddy-dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - APP_ENV=development
+      - AWS_REGION=us-east-1
+      - DYNAMODB_ENDPOINT_URL=http://dynamodb-local:8000
+      - WELLNESS_AGENT_URL=http://wellness-agent:8001
+      - API_URL=http://api:8002
+      - ENABLE_VOICE=true
+    volumes:
+      - ./src:/app/src
+      - ./dashboard:/app/dashboard
+      - ./data:/app/data
+    depends_on:
+      - api
+      - mcp-server
+    networks:
+      - studybuddy-network
+    command: streamlit run dashboard/app.py --server.port=8501 --server.address=0.0.0.0
+
+volumes:
+  dynamodb-data:
+  redis-data:
+
+networks:
+  studybuddy-network:
+    driver: bridge

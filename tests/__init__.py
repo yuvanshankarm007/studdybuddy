@@ -1,0 +1,3 @@
+"""
+StudyBuddy Tests Module
+"""
