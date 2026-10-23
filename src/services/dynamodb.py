@@ -1,3 +1,4 @@
+import time
 """
 DynamoDB Service with Automatic Offline-First SQLite Fallback
 Manages all persistence operations (User Profiles, Daily Usage, Sessions, Traces, Notifications).
@@ -475,7 +476,8 @@ class DynamoDBService:
             'final_plan': trace.final_plan.to_serializable() if trace.final_plan else None,
             'reasoning_chain': trace.reasoning_chain,
             'latency_ms': round(trace.latency_ms or 0.0, 2),
-            'confidence': trace.confidence
+            'confidence': trace.confidence,
+            'ttl': int(time.time()) + 30 * 86400
         }
         try:
             self.local_store.put_item(item)
@@ -524,7 +526,8 @@ class DynamoDBService:
             'scheduled_time': notification.scheduled_time.isoformat(),
             'sent': notification.sent,
             'acknowledged': notification.acknowledged,
-            'created_at': notification.created_at.isoformat()
+            'created_at': notification.created_at.isoformat(),
+            'ttl': int(time.time()) + 7 * 86400
         }
         try:
             self.local_store.put_item(item)

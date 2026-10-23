@@ -391,6 +391,61 @@ async def root():
     }
 
 
+
+
+def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
+    """
+    Unified AWS Lambda entrypoint for StudyBuddy (AWS Builder Mini-Challenge & Alexa+ Track):
+    1. Handles Amazon EventBridge scheduled cron events (source == "aws.events") via proactive_service.
+    2. Handles Amazon API Gateway V2 HTTP API requests (/mcp, /health, /) via Starlette/FastAPI bridge.
+    """
+    import json as _json
+    import asyncio
+    # Route 1: Amazon EventBridge Scheduled Rule
+    if isinstance(event, dict) and event.get("source") == "aws.events":
+        from src.services.proactive import proactive_service
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    res = pool.submit(lambda: asyncio.run(proactive_service.handle_eventbridge_event(event))).result()
+            else:
+                res = loop.run_until_complete(proactive_service.handle_eventbridge_event(event))
+        except RuntimeError:
+            res = asyncio.run(proactive_service.handle_eventbridge_event(event))
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": _json.dumps(res)
+        }
+
+    # Route 2: Amazon API Gateway V2 (HTTP API) or Function URL
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    method = (
+        event.get("requestContext", {}).get("http", {}).get("method")
+        or event.get("httpMethod")
+        or "GET"
+    ).upper()
+    path = event.get("rawPath") or event.get("path") or "/"
+    headers = event.get("headers") or {}
+    body = event.get("body")
+    if body and event.get("isBase64Encoded"):
+        import base64
+        body = base64.b64decode(body)
+
+    resp = client.request(method=method, url=path, headers=headers, content=body)
+    resp_headers = {"Content-Type": resp.headers.get("content-type", "application/json")}
+    if "mcp-session-id" in resp.headers:
+        resp_headers["Mcp-Session-Id"] = resp.headers["mcp-session-id"]
+    return {
+        "statusCode": resp.status_code,
+        "headers": resp_headers,
+        "body": resp.text
+    }
+
+
 if __name__ == "__main__":
-    print(f"🚀 Starting StudyBuddy MCP Server (Spec {MCP_PROTOCOL_VERSION}) on http://0.0.0.0:8000")
+    print(f"Starting StudyBuddy MCP Server (Spec {MCP_PROTOCOL_VERSION}) on http://0.0.0.0:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -128,6 +128,63 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(len(structured["alexa_multimodal"]["alexa_plus_carousel"]), 3)
 
 
+
+    def test_aws_lambda_eventbridge_handler(self):
+        """Test AWS Builder Mini-Challenge EventBridge scheduled rule dispatch via lambda_handler"""
+        from src.server import lambda_handler
+        import json
+        eb_event = {
+            "source": "aws.events",
+            "detail-type": "Scheduled Event",
+            "detail": {
+                "reminder_type": "sleep_reminder",
+                "user_ids": ["aws_builder_test_user"]
+            }
+        }
+        resp = lambda_handler(eb_event, None)
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertEqual(body["status"], "dispatched")
+        self.assertEqual(body["source"], "aws.events")
+        self.assertGreaterEqual(body["notifications_created"], 1)
+
+    def test_aws_lambda_apigw_mcp_handler(self):
+        """Test AWS Builder Mini-Challenge API Gateway V2 HTTP API invocation via lambda_handler"""
+        from src.server import lambda_handler
+        import json
+        apigw_event = {
+            "rawPath": "/mcp",
+            "requestContext": {"http": {"method": "POST"}},
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25"}
+            })
+        }
+        resp = lambda_handler(apigw_event, None)
+        self.assertEqual(resp["statusCode"], 200)
+        self.assertIn("Mcp-Session-Id", resp["headers"])
+        data = json.loads(resp["body"])
+        self.assertEqual(data["result"]["protocolVersion"], "2025-11-25")
+
+    def test_cloudwatch_metric_payload_and_dynamodb_ttl(self):
+        """Test CloudWatch PutMetricData payload format and DynamoDB TTL attribute"""
+        from src.services.observability import observability
+        from src.services.dynamodb import dynamodb_service
+        payload = observability.build_cloudwatch_metric_payload(
+            "check_in_latency", 42.5, "Milliseconds", {"Operation": "check_in"}
+        )
+        self.assertEqual(payload["Namespace"], "StudyBuddy")
+        self.assertEqual(payload["MetricData"][0]["MetricName"], "check_in_latency")
+        self.assertEqual(payload["MetricData"][0]["Unit"], "Milliseconds")
+
+        traces = dynamodb_service.get_recent_traces("api_test_user", limit=5)
+        if traces:
+            self.assertIn("ttl", traces[0])
+
+
 if __name__ == "__main__":
 
     unittest.main()

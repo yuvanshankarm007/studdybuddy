@@ -1,26 +1,27 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  StudyBuddy Infrastructure for Amazon Build Ship Shape 2026
-  Deploys DynamoDB, Lambda, API Gateway, and CloudWatch resources
+  StudyBuddy Infrastructure for Amazon Build Ship Shape 2026 (AWS Builder Mini-Challenge)
+  Deploys DynamoDB (Single-Table + GSI1 + TTL), Lambda (MCP 2025-11-25 + EventBridge Handler),
+  API Gateway V2, EventBridge Scheduled Rules, and CloudWatch Observability Dashboard.
 
 Parameters:
   ProjectName:
     Type: String
     Default: StudyBuddy
     Description: Project name for resource naming
-  
+
   BedrockModelId:
     Type: String
     Default: anthropic.claude-3-haiku-20240307-v1:0
-    Description: Bedrock model ID for LLM operations
-  
+    Description: Amazon Bedrock model ID for coaching, safety verification, and pattern analysis
+
   DailyStudyCap:
     Type: Number
     Default: 240
-    Description: Daily study cap in minutes
+    Description: Daily study cap in minutes (4 hours default)
 
 Resources:
-  # DynamoDB Table (Single-Table Design)
+  # DynamoDB Table (Single-Table Design with GSI1 and TTL)
   StudyBuddyTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -49,6 +50,9 @@ Resources:
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
       SSESpecification:
@@ -59,7 +63,7 @@ Resources:
         - Key: Environment
           Value: Production
 
-  # Lambda Execution Role
+  # Least-Privilege Lambda Execution Role
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -74,11 +78,12 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: StudyBuddyPermissions
+        - PolicyName: StudyBuddyLeastPrivilegePermissions
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Effect: Allow
+              - Sid: DynamoDBSingleTableAccess
+                Effect: Allow
                 Action:
                   - dynamodb:GetItem
                   - dynamodb:PutItem
@@ -88,46 +93,52 @@ Resources:
                 Resource:
                   - !GetAtt StudyBuddyTable.Arn
                   - !Sub "${StudyBuddyTable.Arn}/index/*"
-              - Effect: Allow
+              - Sid: BedrockModelAccess
+                Effect: Allow
                 Action:
                   - bedrock:InvokeModel
-                Resource: "*"
-              - Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+              - Sid: CloudWatchLogsAccess
+                Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: "arn:aws:logs:*:*:*"
-              - Effect: Allow
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${ProjectName}/agents:*"
+              - Sid: CloudWatchMetricsScopedNamespace
+                Effect: Allow
                 Action:
                   - cloudwatch:PutMetricData
                 Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Ref ProjectName
 
-  # Lambda Function (MCP Server)
+  # Lambda Function (Hosts MCP 2025-11-25 Server + EventBridge Proactive Dispatcher)
   MCPServerFunction:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub "${ProjectName}-MCP-Server"
       Runtime: python3.12
-      Handler: server.lambda_handler
+      Handler: src.server.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Code:
         ZipFile: |
-          # Placeholder - actual code deployed via CI/CD
-          def lambda_handler(event, context):
-              return {"statusCode": 200, "body": "StudyBuddy MCP Server"}
+          from src.server import lambda_handler
       Environment:
         Variables:
           DYNAMODB_TABLE: !Ref StudyBuddyTable
           BEDROCK_MODEL_ID: !Ref BedrockModelId
           DAILY_STUDY_CAP: !Ref DailyStudyCap
+          ENABLE_CLOUDWATCH: "true"
       Timeout: 30
       MemorySize: 512
       Tags:
         - Key: Project
           Value: !Ref ProjectName
 
-  # API Gateway (HTTP API)
+  # API Gateway V2 (HTTP API for Streamable HTTP MCP /mcp & REST)
   StudyBuddyAPI:
     Type: AWS::ApiGatewayV2::Api
     Properties:
@@ -142,11 +153,14 @@ Resources:
           - POST
           - PUT
           - DELETE
+          - OPTIONS
         AllowHeaders:
           - "*"
+        ExposeHeaders:
+          - Mcp-Session-Id
 
-  # Lambda Permission for API Gateway
-  LambdaPermission:
+  # Lambda Permission for API Gateway V2
+  LambdaApiGatewayPermission:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref MCPServerFunction
@@ -161,7 +175,7 @@ Resources:
       LogGroupName: !Sub "/${ProjectName}/agents"
       RetentionInDays: 30
 
-  # CloudWatch Dashboard
+  # CloudWatch Observability Dashboard
   StudyBuddyDashboard:
     Type: AWS::CloudWatch::Dashboard
     Properties:
@@ -172,25 +186,20 @@ Resources:
             {
               "type": "metric",
               "properties": {
-                "title": "Agent Latency",
+                "title": "Multi-Agent Latency (ms)",
                 "metrics": [
                   ["StudyBuddy", "check_in_latency", {"stat": "Average"}],
                   ["StudyBuddy", "plan_creation_latency", {"stat": "Average"}],
                   ["StudyBuddy", "safety_check_latency", {"stat": "Average"}]
                 ],
                 "period": 300,
-                "yAxis": {
-                  "left": {
-                    "min": 0,
-                    "max": 1000
-                  }
-                }
+                "yAxis": {"left": {"min": 0, "max": 1000}}
               }
             },
             {
               "type": "metric",
               "properties": {
-                "title": "Agent Calls",
+                "title": "Agent Invocations & Safety Interventions",
                 "metrics": [
                   ["StudyBuddy", "agent_calls", "Agent", "supervisor", {"stat": "Sum"}],
                   ["StudyBuddy", "agent_calls", "Agent", "planner", {"stat": "Sum"}],
@@ -202,7 +211,7 @@ Resources:
             {
               "type": "metric",
               "properties": {
-                "title": "User Engagement",
+                "title": "Student Engagement & Guardrail Events",
                 "metrics": [
                   ["StudyBuddy", "user_engagement", "Event", "check_in", {"stat": "Sum"}],
                   ["StudyBuddy", "user_engagement", "Event", "session_complete", {"stat": "Sum"}],
@@ -214,31 +223,63 @@ Resources:
           ]
         }
 
-  # EventBridge Rule (Proactive Agent)
-  ProactiveScheduleRule:
+  # EventBridge Rule 1: Evening Study Check-In Reminder (19:00 UTC)
+  ProactiveCheckinScheduleRule:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub "${ProjectName}-Proactive-Schedule"
-      Description: "Trigger proactive agent daily"
+      Name: !Sub "${ProjectName}-Evening-Checkin-Schedule"
+      Description: "Trigger proactive study check-in reminder at 19:00"
       ScheduleExpression: "cron(0 19 * * ? *)"
       State: ENABLED
       Targets:
-        - Id: ProactiveTarget
+        - Id: ProactiveCheckinTarget
           Arn: !GetAtt MCPServerFunction.Arn
+          Input: '{"source": "aws.events", "detail-type": "Scheduled Event", "detail": {"reminder_type": "checkin_reminder"}}'
+
+  # EventBridge Rule 2: Wind-Down Sleep Cutoff Reminder (21:30 UTC)
+  ProactiveSleepScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-Sleep-Cutoff-Schedule"
+      Description: "Trigger wind-down reminder 30 minutes before 22:00 sleep cutoff"
+      ScheduleExpression: "cron(30 21 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Id: ProactiveSleepTarget
+          Arn: !GetAtt MCPServerFunction.Arn
+          Input: '{"source": "aws.events", "detail-type": "Scheduled Event", "detail": {"reminder_type": "sleep_reminder"}}'
+
+  # Lambda Permission for EventBridge Check-In Rule
+  LambdaEventBridgeCheckinPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MCPServerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ProactiveCheckinScheduleRule.Arn
+
+  # Lambda Permission for EventBridge Sleep Rule
+  LambdaEventBridgeSleepPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MCPServerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ProactiveSleepScheduleRule.Arn
 
 Outputs:
   DynamoDBTable:
-    Description: DynamoDB Table Name
+    Description: DynamoDB Single-Table Name
     Value: !Ref StudyBuddyTable
     Export:
       Name: !Sub "${ProjectName}-Table"
 
   APIEndpoint:
-    Description: API Gateway Endpoint
+    Description: API Gateway V2 Streamable HTTP MCP Endpoint
     Value: !Sub "${StudyBuddyAPI.ApiEndpoint}"
     Export:
       Name: !Sub "${ProjectName}-API-Endpoint"
 
   CloudWatchDashboard:
-    Description: CloudWatch Dashboard URL
+    Description: CloudWatch Observability Dashboard URL
     Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProjectName}-Monitoring"

@@ -1,8 +1,9 @@
 """
 Observability Service
-Provides CloudWatch logging, metrics, and in-memory agent decision tracing.
-Never blocks or fails when running offline or without AWS credentials.
+Provides Amazon CloudWatch Logs (/StudyBuddy/agents), CloudWatch Custom Metrics (StudyBuddy namespace),
+and non-blocking in-memory agent decision tracing for offline/local execution.
 """
+import os
 import time
 import json
 from datetime import datetime
@@ -14,16 +15,56 @@ from src.config import settings, get_logger
 logger = get_logger(__name__)
 
 
+def _has_real_aws_credentials() -> bool:
+    ak = settings.AWS_ACCESS_KEY_ID or os.environ.get("AWS_ACCESS_KEY_ID", "")
+    sk = settings.AWS_SECRET_ACCESS_KEY or os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+    if ak and sk and not ak.startswith("your_") and not ak.startswith("fake"):
+        return True
+    return os.path.exists(os.path.expanduser("~/.aws/credentials"))
+
+
 class ObservabilityService:
-    """Service for system observability and monitoring with in-memory metrics store"""
+    """Service for AWS CloudWatch observability and local in-memory telemetry"""
 
     def __init__(self):
-        self.enabled = False
-        self.cloudwatch = None
-        self.logs = None
-        self.log_group = "/studybuddy/agents"
+        self.log_group = "/StudyBuddy/agents"
         self.metric_namespace = "StudyBuddy"
         self.metrics_history: List[Dict[str, Any]] = []
+        self.cloudwatch = None
+        self.logs = None
+        self.enabled = bool(getattr(settings, "ENABLE_CLOUDWATCH", getattr(settings, "ENABLE_OBSERVABILITY", True)) and _has_real_aws_credentials())
+        if self.enabled:
+            try:
+                import boto3
+                from botocore.config import Config
+                cfg = Config(connect_timeout=1, read_timeout=2, retries={"max_attempts": 1})
+                self.cloudwatch = boto3.client("cloudwatch", region_name=settings.AWS_REGION, config=cfg)
+                self.logs = boto3.client("logs", region_name=settings.AWS_REGION, config=cfg)
+            except Exception as e:
+                logger.warning("cloudwatch_init_fallback", error=str(e))
+                self.enabled = False
+
+    def build_cloudwatch_metric_payload(
+        self,
+        metric_name: str,
+        value: float,
+        unit: str = "Count",
+        dimensions: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """Build exact AWS CloudWatch PutMetricData payload structure"""
+        dims = [{"Name": str(k), "Value": str(v)} for k, v in (dimensions or {}).items()]
+        item: Dict[str, Any] = {
+            "MetricName": metric_name,
+            "Value": float(value),
+            "Unit": unit,
+            "Timestamp": datetime.utcnow().isoformat()
+        }
+        if dims:
+            item["Dimensions"] = dims
+        return {
+            "Namespace": self.metric_namespace,
+            "MetricData": [item]
+        }
 
     def log_agent_decision(
         self,
@@ -51,15 +92,26 @@ class ObservabilityService:
         unit: str = "Count",
         dimensions: Optional[Dict[str, str]] = None
     ):
+        payload = self.build_cloudwatch_metric_payload(metric_name, value, unit, dimensions)
         self.metrics_history.append({
             "metric_name": metric_name,
             "value": value,
             "unit": unit,
             "dimensions": dimensions or {},
+            "cloudwatch_payload": payload,
             "timestamp": datetime.now().isoformat()
         })
         if len(self.metrics_history) > 500:
             self.metrics_history = self.metrics_history[-500:]
+
+        if self.enabled and self.cloudwatch is not None:
+            try:
+                self.cloudwatch.put_metric_data(
+                    Namespace=payload["Namespace"],
+                    MetricData=payload["MetricData"]
+                )
+            except Exception as e:
+                logger.debug("cloudwatch_put_metric_skipped", error=str(e))
 
     def record_latency(self, operation: str, latency_ms: float):
         self.record_metric(f"{operation}_latency", latency_ms, "Milliseconds", {"Operation": operation})

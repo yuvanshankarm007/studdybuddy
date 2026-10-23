@@ -1,6 +1,6 @@
 """
 Proactive Agent Service
-Manages scheduled check-ins, reminders, and proactive notifications
+Manages Amazon EventBridge scheduled check-ins, wind-down sleep reminders, and proactive outreach.
 """
 import uuid
 from datetime import datetime, timedelta
@@ -11,12 +11,13 @@ from src.models.schemas import ProactiveNotification
 from src.services.dynamodb import dynamodb_service
 from src.services.bedrock import bedrock_service
 from src.services.memory import memory_service
+from src.services.observability import observability
 
 logger = get_logger(__name__)
 
 
 class ProactiveAgentService:
-    """Handles scheduled notifications and proactive outreach"""
+    """Handles scheduled notifications and EventBridge proactive outreach"""
 
     def __init__(self):
         self.enabled = settings.ENABLE_PROACTIVE
@@ -45,6 +46,7 @@ class ProactiveAgentService:
             scheduled_time=datetime.now().replace(hour=min(23, max(0, self.checkin_hour)), minute=0)
         )
         self.db.save_notification(notification)
+        observability.record_user_engagement(user_id, "proactive_checkin_reminder")
         return notification
 
     async def generate_sleep_reminder(self, user_id: str) -> Optional[ProactiveNotification]:
@@ -63,6 +65,7 @@ class ProactiveAgentService:
             scheduled_time=datetime.now().replace(hour=min(23, max(0, self.sleep_hour)), minute=0)
         )
         self.db.save_notification(notification)
+        observability.record_user_engagement(user_id, "proactive_sleep_reminder")
         return notification
 
     async def generate_encouragement(self, user_id: str) -> Optional[ProactiveNotification]:
@@ -82,14 +85,48 @@ class ProactiveAgentService:
             scheduled_time=datetime.now() + timedelta(hours=1)
         )
         self.db.save_notification(notification)
+        observability.record_user_engagement(user_id, "proactive_encouragement")
         return notification
 
-    async def run_daily_schedule(self, user_id: str):
+    async def run_daily_schedule(self, user_id: str) -> List[Dict[str, Any]]:
         if not settings.ENABLE_PROACTIVE:
-            return
-        await self.generate_checkin_reminder(user_id)
-        await self.generate_sleep_reminder(user_id)
-        await self.generate_encouragement(user_id)
+            return []
+        dispatched = []
+        for fn in (self.generate_checkin_reminder, self.generate_sleep_reminder, self.generate_encouragement):
+            notif = await fn(user_id)
+            if notif:
+                dispatched.append(notif.to_serializable())
+        return dispatched
+
+    async def handle_eventbridge_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Process an Amazon EventBridge scheduled rule event (`aws.events`)"""
+        detail = event.get("detail") or {}
+        reminder_type = detail.get("reminder_type", "daily_schedule")
+        target_users = detail.get("user_ids") or ["default_user"]
+
+        results = []
+        for uid in target_users:
+            if reminder_type == "checkin_reminder":
+                notif = await self.generate_checkin_reminder(uid)
+                if notif:
+                    results.append(notif.to_serializable())
+            elif reminder_type == "sleep_reminder":
+                notif = await self.generate_sleep_reminder(uid)
+                if notif:
+                    results.append(notif.to_serializable())
+            else:
+                batch = await self.run_daily_schedule(uid)
+                results.extend(batch)
+
+        observability.record_agent_call("proactive_eventbridge", True)
+        return {
+            "status": "dispatched",
+            "source": "aws.events",
+            "reminder_type": reminder_type,
+            "notifications_created": len(results),
+            "notifications": results,
+            "timestamp": datetime.now().isoformat()
+        }
 
 
 proactive_service = ProactiveAgentService()
